@@ -1,0 +1,113 @@
+import base64
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackContext, CallbackQueryHandler
+
+# فك تشفير API Key من base64
+encoded_api_key = "UTNlbEpKcjFDem1NQkxybHBlVGZrQT09"
+api_key = base64.b64decode(encoded_api_key).decode('utf-8')
+
+TOKEN = "7629084222:AAGkBw9NJRHwBbEW7BW3xUuYnlAdvqOTjds"
+
+DURIAN_API_BASE = "https://durianrcs.cc/api/v1"
+
+# قائمة الدول المتاحة (كمثال)
+COUNTRIES = {
+    "ru": "Russia",
+    "kz": "Kazakhstan",
+    "id": "Indonesia",
+    "vn": "Vietnam",
+    "kg": "Kyrgyzstan",
+    # أضف المزيد حسب الحاجة
+}
+
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "أهلاً بك في بوت DurianRCS!\n"
+        "استخدم /buy لشراء رقم جديد."
+    )
+
+def buy(update: Update, context: CallbackContext):
+    keyboard = [
+        [InlineKeyboardButton(name, callback_data=code)]
+        for code, name in COUNTRIES.items()
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text(
+        "اختر الدولة للحصول على رقم:",
+        reply_markup=reply_markup
+    )
+
+def button(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    country_code = query.data
+
+    # طلب رقم من DurianRCS
+    url = f"{DURIAN_API_BASE}/orders"
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    data = {
+        "service": "telegram",
+        "country": country_code,
+        "count": 1
+    }
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code == 200:
+        res = response.json()
+        if res.get("success"):
+            order = res.get("data")[0]
+            number = order.get("number")
+            order_id = order.get("id")
+            context.user_data["order_id"] = order_id
+            query.edit_message_text(
+                f"تم الحصول على الرقم:\n{number}\n"
+                "انتظر الكود وسيتم إرساله هنا."
+            )
+            # بدء المراقبة للكود
+            context.job_queue.run_repeating(
+                check_code,
+                interval=5,
+                first=5,
+                context=(update.effective_chat.id, order_id)
+            )
+        else:
+            query.edit_message_text("حدث خطأ في الطلب: " + res.get("message", ""))
+    else:
+        query.edit_message_text(f"خطأ في الاتصال: {response.status_code}")
+
+def check_code(context: CallbackContext):
+    job = context.job
+    chat_id, order_id = job.context
+    url = f"{DURIAN_API_BASE}/orders/{order_id}"
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        res = response.json()
+        if res.get("success"):
+            sms = res["data"].get("sms")
+            if sms:
+                # أرسل الكود للمستخدم
+                context.bot.send_message(chat_id, f"وصل الكود:\n{sms}")
+                job.schedule_removal()
+        else:
+            context.bot.send_message(chat_id, "خطأ في جلب الكود: " + res.get("message", ""))
+    else:
+        context.bot.send_message(chat_id, f"خطأ في الاتصال: {response.status_code}")
+
+def main():
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("buy", buy))
+    dp.add_handler(CallbackQueryHandler(button))
+
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
